@@ -2,8 +2,11 @@ import numpy as np
 import argparse
 import os
 import tensorflow as tf
-import matplotlib.pyplot as plt
+from PIL import Image
+from io import BytesIO
 import pathlib
+import glob
+import matplotlib.pyplot as plt
 
 from object_detection.utils import ops as utils_ops
 from object_detection.utils import label_map_util
@@ -19,7 +22,6 @@ tf.gfile = tf.io.gfile
 def load_model(model_path):
     model = tf.saved_model.load(model_path)
     return model
-
 
 
 def load_image_into_numpy_array(path):
@@ -96,7 +98,7 @@ def run_inference(model, category_index, image_path):
                 line_thickness=8)
             plt.imshow(image_np)
             plt.show()
-    elif
+    else:
         image_np = load_image_into_numpy_array(image_path)
         # Actual detection.
         output_dict = run_inference_for_single_image(model, image_np)
