@@ -2,7 +2,6 @@ import numpy as np
 import argparse
 import tensorflow as tf
 import cv2
-import pathlib
 
 from object_detection.utils import ops as utils_ops
 from object_detection.utils import label_map_util

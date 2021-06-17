@@ -1,11 +1,11 @@
 import numpy as np
 import argparse
-import os
 import tensorflow as tf
+import cv2
+import datetime
+import os
 from PIL import Image
-from io import BytesIO
-import glob
-import matplotlib.pyplot as plt
+import pandas as pd
 
 from object_detection.utils import ops as utils_ops
 from object_detection.utils import label_map_util
@@ -23,27 +23,8 @@ def load_model(model_path):
     return model
 
 
-def load_image_into_numpy_array(path):
-  """Load an image from file into a numpy array.
-
-  Puts image into numpy array to feed into tensorflow graph.
-  Note that by convention we put it into a numpy array with shape
-  (height, width, channels), where channels=3 for RGB.
-
-  Args:
-    path: a file path (this can be local or on colossus)
-
-  Returns:
-    uint8 numpy array with shape (img_height, img_width, 3)
-  """
-  img_data = tf.io.gfile.GFile(path, 'rb').read()
-  image = Image.open(BytesIO(img_data))
-  (im_width, im_height) = image.size
-  return np.array(image.getdata()).reshape(
-      (im_height, im_width, 3)).astype(np.uint8)
-
-
 def run_inference_for_single_image(model, image):
+    image = np.asarray(image)
     # The input needs to be a tensor, convert it using `tf.convert_to_tensor`.
     input_tensor = tf.convert_to_tensor(image)
     # The model expects a batch of images, so add an axis with `tf.newaxis`.
@@ -75,16 +56,28 @@ def run_inference_for_single_image(model, image):
     return output_dict
 
 
-def run_inference(model, category_index, image_path):
-    if os.path.isdir(image_path):
-        image_paths = []
-        for file_extension in ('*.png', '*jpg'):
-            image_paths.extend(glob.glob(os.path.join(image_path, file_extension)))
-        
-        for i_path in image_paths:
-            image_np = load_image_into_numpy_array(i_path)
-            # Actual detection.
-            output_dict = run_inference_for_single_image(model, image_np)
+def run_inference(model, category_index, cap, show_video_steam, label_to_look_for, output_directory, threshold):
+    # Create output directory if not already created
+    os.makedirs(output_directory, exist_ok=True)
+    os.makedirs(output_directory+'/images', exist_ok=True)
+
+    if os.path.exists(output_directory+'/results.csv'):
+        df = pd.read_csv(output_directory+'/results.csv')
+    else:
+        df = pd.DataFrame(columns=['timestamp', 'img_path'])
+
+    while True:
+        ret, image_np = cap.read()
+
+        # Copy image for later
+        image_show = np.copy(image_np)
+
+        image_height, image_width, _ = image_np.shape
+
+        # Actual detection.
+        output_dict = run_inference_for_single_image(model, image_np)
+
+        if show_video_steam:
             # Visualization of the results of a detection.
             vis_util.visualize_boxes_and_labels_on_image_array(
                 image_np,
@@ -95,34 +88,44 @@ def run_inference(model, category_index, image_path):
                 instance_masks=output_dict.get('detection_masks_reframed', None),
                 use_normalized_coordinates=True,
                 line_thickness=8)
-            plt.imshow(image_np)
-            plt.show()
-    else:
-        image_np = load_image_into_numpy_array(image_path)
-        # Actual detection.
-        output_dict = run_inference_for_single_image(model, image_np)
-        # Visualization of the results of a detection.
-        vis_util.visualize_boxes_and_labels_on_image_array(
-            image_np,
-            output_dict['detection_boxes'],
-            output_dict['detection_classes'],
-            output_dict['detection_scores'],
-            category_index,
-            instance_masks=output_dict.get('detection_masks_reframed', None),
-            use_normalized_coordinates=True,
-            line_thickness=8)
-        plt.imshow(image_np)
-        plt.show()
+            cv2.imshow('object_detection', cv2.resize(image_np, (800, 600)))
+            if cv2.waitKey(25) & 0xFF == ord('q'):
+                cap.release()
+                cv2.destroyAllWindows()
+                break
 
+        # Get data(label, xmin, ymin, xmax, ymax)
+        output = []
+        for index, score in enumerate(output_dict['detection_scores']):
+            if score < threshold:
+                continue
+            label = category_index[output_dict['detection_classes'][index]]['name']
+            ymin, xmin, ymax, xmax = output_dict['detection_boxes'][index]
+            output.append((label, int(xmin * image_width), int(ymin * image_height), int(xmax * image_width), int(ymax * image_height)))
+
+        # Save incident (could be extended to send a email or something)
+        for l, x_min, y_min, x_max, y_max in output:
+            if l == label_to_look_for:
+                array = cv2.cvtColor(np.array(image_show), cv2.COLOR_RGB2BGR)
+                image = Image.fromarray(array)
+                cropped_img = image.crop((x_min, y_min, x_max, y_max))
+                file_path = output_directory+'/images/'+str(len(df))+'.jpg'
+                cropped_img.save(file_path, "JPEG", icc_profile=cropped_img.info.get('icc_profile'))
+                df.loc[len(df)] = [datetime.datetime.now(), file_path]
+                df.to_csv(output_directory+'/results.csv', index=None)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Detect objects inside webcam videostream')
     parser.add_argument('-m', '--model', type=str, required=True, help='Model Path')
     parser.add_argument('-l', '--labelmap', type=str, required=True, help='Path to Labelmap')
-    parser.add_argument('-i', '--image_path', type=str, required=True, help='Path to image (or folder)')
+    parser.add_argument('-t', '--threshold', type=float, default=0.5, help='Threshold for bounding boxes')
+    parser.add_argument('-s', '--show', default=True, action='store_true', help='Show window')
+    parser.add_argument('-la', '--label', default='person', type=str, help='Label name to detect')
+    parser.add_argument('-o', '--output_directory', default='results', type=str, help='Directory for the outputs')
     args = parser.parse_args()
 
     detection_model = load_model(args.model)
     category_index = label_map_util.create_category_index_from_labelmap(args.labelmap, use_display_name=True)
 
-    run_inference(detection_model, category_index, args.image_path)
+    cap = cv2.VideoCapture(2)
+    run_inference(detection_model, category_index, cap, args.show, args.label, args.output_directory, args.threshold)
